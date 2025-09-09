@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<body>
+    <h2>Test FaceSwap API</h2>
+    
+    <button onclick="testHealth()">Test Health</button>
+    <button onclick="getTargetImages()">Get Target Images</button>
+    
+    <h3>Upload Source Image</h3>
+    <input type="file" id="sourceImage">
+    <button onclick="uploadSource()">Upload</button>
+    
+    <h3>Face Swap</h3>
+    <input type="text" id="sourceId" placeholder="Source ID">
+    <input type="text" id="targetId" placeholder="Target ID">
+    <button onclick="faceSwap()">Swap Faces</button>
+    
+    <h3>Download Result</h3>
+    <input type="text" id="resultId" placeholder="Result ID">
+    <button onclick="downloadResult()">Download</button>
+    
+    <div id="result"></div>
+
+    <script>
+        const BASE_URL = 'https://faceswap-api-fqoz.onrender.com';
+        
+        async function testHealth() {
+            try {
+                const response = await fetch(`${BASE_URL}/api/health`);
+                const data = await response.json();
+                showResult('Health: ' + JSON.stringify(data));
+            } catch (error) {
+                showResult('Error: ' + error.message);
+            }
+        }
+        
+        async function getTargetImages() {
+            try {
+                const response = await fetch(`${BASE_URL}/api/target-images`);
+                const data = await response.json();
+                showResult('Target Images: ' + JSON.stringify(data));
+            } catch (error) {
+                showResult('Error: ' + error.message);
+            }
+        }
+        
+        async function uploadSource() {
+            const fileInput = document.getElementById('sourceImage');
+            if (!fileInput.files[0]) {
+                showResult('Please select a file');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            
+            try {
+                const response = await fetch(`${BASE_URL}/api/upload/source`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+                showResult('Upload Result: ' + JSON.stringify(data));
+            } catch (error) {
+                showResult('Error: ' + error.message);
+            }
+        }
+        
+        async function faceSwap() {
+            const sourceId = document.getElementById('sourceId').value;
+            const targetId = document.getElementById('targetId').value;
+            
+            if (!sourceId || !targetId) {
+                showResult('Please enter both IDs');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${BASE_URL}/api/faceswap`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        source_image_id: sourceId,
+                        target_image_id: targetId
+                    })
+                });
+                const data = await response.json();
+                showResult('Face Swap Result: ' + JSON.stringify(data));
+            } catch (error) {
+                showResult('Error: ' + error.message);
+            }
+        }
+        
+        function downloadResult() {
+            const resultId = document.getElementById('resultId').value;
+            if (!resultId) {
+                showResult('Please enter Result ID');
+                return;
+            }
+            
+            window.open(`${BASE_URL}/api/results/${resultId}`, '_blank');
+        }
+        
+        function showResult(message) {
+            document.getElementById('result').innerText = message;
+        }
+    </script>
+</body>
+</html>

@@ -14,7 +14,7 @@ import uuid
 from pydantic import BaseModel
 from typing import List, Optional
 import json
-
+import asyncio
 app = FastAPI(title="FaceSwap API", version="1.0.0")
 
 # CORS middleware
@@ -54,33 +54,51 @@ class FaceSwapResponse(BaseModel):
     message: str
 
 # Utility functions
+# Utility functions
 async def call_huggingface_space(src_img_data, tgt_img_data):
     """
     Call the Hugging Face Space API for face swapping
     """
     try:
+        print("Preparing to call Hugging Face Space...")
+        
         # Prepare files for the request
         files = {
             'src_img': ('source.jpg', src_img_data, 'image/jpeg'),
             'tgt_img': ('target.jpg', tgt_img_data, 'image/jpeg')
         }
         
+        print("Making request to Hugging Face Space...")
+        
         # Make the request to Hugging Face Space
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{HF_SPACE_URL}/api/faceswap",
-                data=files
+                data=files,
+                timeout=aiohttp.ClientTimeout(total=300)  # 5 minute timeout
             ) as response:
+                print(f"Hugging Face Space response status: {response.status}")
+                
                 if response.status != 200:
                     error_text = await response.text()
-                    raise Exception(f"Hugging Face API error: {error_text}")
+                    print(f"Hugging Face Space error: {error_text}")
+                    return None, f"Hugging Face API error: {error_text}"
                 
                 # Get the image data from response
                 result_data = await response.read()
+                print(f"Received response data of length: {len(result_data)}")
+                
+                if len(result_data) == 0:
+                    return None, "Empty response from Hugging Face Space"
+                
                 return result_data, None
                 
+    except asyncio.TimeoutError:
+        print("Timeout calling Hugging Face Space")
+        return None, "Request timeout - Hugging Face Space took too long to respond"
     except Exception as e:
-        return None, str(e)
+        print(f"Exception calling Hugging Face Space: {str(e)}")
+        return None, f"Failed to call Hugging Face Space: {str(e)}"
 
 # API Endpoints
 
@@ -196,12 +214,15 @@ async def upload_target_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 # 5. Face Swap Endpoint
+# 5. Face Swap Endpoint
 @app.post("/api/faceswap", response_model=FaceSwapResponse)
 async def perform_face_swap(request: FaceSwapRequest):
     """
     Perform face swap between source and target images
     """
     try:
+        print(f"Starting face swap with source: {request.source_image_id}, target: {request.target_image_id}")
+        
         # Get source and target images from MongoDB
         source_doc = await source_images_collection.find_one({"_id": ObjectId(request.source_image_id)})
         target_doc = await target_images_collection.find_one({"_id": ObjectId(request.target_image_id)})
@@ -211,6 +232,8 @@ async def perform_face_swap(request: FaceSwapRequest):
         if not target_doc:
             raise HTTPException(status_code=404, detail="Target image not found")
         
+        print("Images found in database, calling Hugging Face Space...")
+        
         # Call Hugging Face Space for face swapping
         result_data, error = await call_huggingface_space(
             source_doc["image_data"], 
@@ -218,7 +241,14 @@ async def perform_face_swap(request: FaceSwapRequest):
         )
         
         if error:
+            print(f"Hugging Face Space error: {error}")
             raise HTTPException(status_code=500, detail=error)
+        
+        if not result_data:
+            print("No result data returned from Hugging Face Space")
+            raise HTTPException(status_code=500, detail="No result data returned from face swap service")
+        
+        print("Face swap successful, storing result...")
         
         # Store result in MongoDB
         result_doc = {
@@ -232,13 +262,19 @@ async def perform_face_swap(request: FaceSwapRequest):
         
         result = await results_collection.insert_one(result_doc)
         
+        print(f"Face swap completed successfully. Result ID: {result.inserted_id}")
+        
         return {
             "result_id": str(result.inserted_id),
             "message": "Face swap completed successfully"
         }
         
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error in face swap: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 # 6. Download Result Endpoint
 @app.get("/api/results/{result_id}")
