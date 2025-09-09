@@ -1,263 +1,137 @@
+import os
+import uuid
+import base64
+import aiohttp
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
-from pydantic import BaseModel
-from typing import List
-from datetime import datetime
-import aiohttp
-import base64
-import io
-from PIL import Image
-import os
-import asyncio
+from pathlib import Path
 
-app = FastAPI(title="FaceSwap API", version="1.0.0")
-
-# -------------------------------
-# CORS middleware
-# -------------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# -------------------------------
-# MongoDB connection
-# -------------------------------
+# -----------------------------
+# MongoDB Setup
+# -----------------------------
 MONGODB_URL = os.getenv(
     "MONGODB_URL",
     "mongodb+srv://harilogicgo_db_user:logicgoinfotech@cluster0.dcs1tnb.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 )
 client = AsyncIOMotorClient(MONGODB_URL)
 database = client.FaceSwap
-target_images_collection = database.get_collection("Target_Images")
 source_images_collection = database.get_collection("Source_Images")
+target_images_collection = database.get_collection("Target_Images")
 results_collection = database.get_collection("Results")
 
-# -------------------------------
-# Hugging Face Space URL (fixed)
-# -------------------------------
-HF_SPACE_URL = "https://logicgoinfotechspaces-faceswap.hf.space"
+# -----------------------------
+# Temporary Directories
+# -----------------------------
+BASE_DIR = "./workspace"
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+RESULT_DIR = os.path.join(BASE_DIR, "results")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(RESULT_DIR, exist_ok=True)
 
-# -------------------------------
-# Pydantic models
-# -------------------------------
-class ImageResponse(BaseModel):
-    id: str
-    filename: str
-    content_type: str
-    uploaded_at: datetime
+# -----------------------------
+# Hugging Face Gradio API
+# -----------------------------
+HF_GRADIO_URL = "https://logicgoinfotechspaces-faceswap.hf.space/run/predict"
+  # replace with your HF Space API
 
-class FaceSwapRequest(BaseModel):
-    source_image_id: str
-    target_image_id: str
+# -----------------------------
+# FastAPI app
+# -----------------------------
+app = FastAPI(title="Face Swap API")
 
-class FaceSwapResponse(BaseModel):
-    result_id: str
-    message: str
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
-# -------------------------------
-# Utility: call Hugging Face Space
-# -------------------------------
-async def call_huggingface_space(src_img_data, tgt_img_data):
-    """
-    Call HF Space /api/faceswap endpoint with file uploads.
-    """
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # Prepare files for multipart form-data
-            files = {
-                'src_img': ('source.jpg', src_img_data, 'image/jpeg'),
-                'tgt_img': ('target.jpg', tgt_img_data, 'image/jpeg')
-            }
+async def save_upload_file(upload_file: UploadFile, folder: str) -> str:
+    """Save uploaded file to temporary folder and return path"""
+    ext = Path(upload_file.filename).suffix
+    unique_name = f"{uuid.uuid4().hex}{ext}"
+    file_path = os.path.join(folder, unique_name)
+    with open(file_path, "wb") as f:
+        f.write(await upload_file.read())
+    return file_path
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{HF_SPACE_URL}/api/faceswap",
-                    data=files,
-                    timeout=aiohttp.ClientTimeout(total=300)
-                ) as response:
-                    if response.status == 404 and attempt < max_retries - 1:
-                        # Space might be waking up, wait and retry
-                        print(f"Attempt {attempt + 1} failed, retrying in 10 seconds...")
-                        await asyncio.sleep(10)
-                        continue
-                        
-                    if response.status != 200:
-                        error_text = await response.text()
-                        print(f"Hugging Face Space error: {error_text}")
-                        return None, f"Hugging Face API error: {error_text}"
-
-                    # Get the image data directly from response
-                    result_data = await response.read()
-                    return result_data, None
-
-        except asyncio.TimeoutError:
-            if attempt < max_retries - 1:
-                print(f"Attempt {attempt + 1} timeout, retrying...")
-                await asyncio.sleep(10)
-                continue
-            return None, "Request timeout - Hugging Face Space took too long"
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"Attempt {attempt + 1} failed, retrying...")
-                await asyncio.sleep(10)
-                continue
-            return None, f"Failed to call Hugging Face Space: {str(e)}"
-    
-    return None, "All retry attempts failed"
-
-# -------------------------------
-# API Endpoints
-# -------------------------------
-@app.get("/")
-async def root():
-    return {"message": "FaceSwap API is running", "status": "healthy"}
-
-@app.post("/api/upload/source", response_model=ImageResponse)
-async def upload_source_image(file: UploadFile = File(...)):
-    contents = await file.read()
-    try:
-        Image.open(io.BytesIO(contents))
-    except:
-        raise HTTPException(status_code=400, detail="Invalid image file")
-    doc = {
-        "filename": file.filename,
-        "image_data": contents,
-        "content_type": file.content_type,
-        "uploaded_at": datetime.utcnow()
-    }
+@app.post("/source")
+async def upload_source(file: UploadFile = File(...)):
+    """Upload user source image and store in MongoDB"""
+    path = await save_upload_file(file, UPLOAD_DIR)
+    doc = {"filename": file.filename, "path": path}
     result = await source_images_collection.insert_one(doc)
-    return {
-        "id": str(result.inserted_id),
-        "filename": file.filename,
-        "content_type": file.content_type,
-        "uploaded_at": doc["uploaded_at"]
-    }
+    return {"source_id": str(result.inserted_id), "path": path}
 
-@app.get("/api/target-images", response_model=List[ImageResponse])
-async def get_target_images():
-    images = []
-    async for img in target_images_collection.find({}, {"image_data": 0}):
-        images.append({
-            "id": str(img["_id"]),
-            "filename": img["filename"],
-            "content_type": img["content_type"],
-            "uploaded_at": img["uploaded_at"]
-        })
-    return images
+@app.post("/faceswap")
+async def face_swap(source_id: str, target_id: str):
+    """
+    Perform face swap:
+    - Source image uploaded by user (source_id)
+    - Target image already stored in MongoDB (target_id)
+    """
+    # Fetch images from MongoDB
+    source_doc = await source_images_collection.find_one({"_id": ObjectId(source_id)})
+    target_doc = await target_images_collection.find_one({"_id": ObjectId(target_id)})
 
-@app.get("/api/target-images/{image_id}")
-async def get_target_image(image_id: str):
-    img = await target_images_collection.find_one({"_id": ObjectId(image_id)})
-    if not img:
-        raise HTTPException(status_code=404, detail="Image not found")
-    return StreamingResponse(io.BytesIO(img["image_data"]), media_type=img["content_type"],
-                             headers={"Content-Disposition": f"inline; filename={img['filename']}"})
+    if not source_doc or not target_doc:
+        raise HTTPException(status_code=404, detail="Source or Target image not found")
 
-@app.post("/api/upload/target", response_model=ImageResponse)
-async def upload_target_image(file: UploadFile = File(...)):
-    contents = await file.read()
-    try:
-        Image.open(io.BytesIO(contents))
-    except:
-        raise HTTPException(status_code=400, detail="Invalid image file")
-    doc = {
-        "filename": file.filename,
-        "image_data": contents,
-        "content_type": file.content_type,
-        "uploaded_at": datetime.utcnow()
-    }
-    result = await target_images_collection.insert_one(doc)
-    return {
-        "id": str(result.inserted_id),
-        "filename": file.filename,
-        "content_type": file.content_type,
-        "uploaded_at": doc["uploaded_at"]
-    }
+    # Read image bytes
+    with open(source_doc["path"], "rb") as f:
+        src_bytes = f.read()
+    with open(target_doc["path"], "rb") as f:
+        tgt_bytes = f.read()
 
-@app.post("/api/faceswap", response_model=FaceSwapResponse)
-async def perform_face_swap(request: FaceSwapRequest):
-    source_doc = await source_images_collection.find_one({"_id": ObjectId(request.source_image_id)})
-    target_doc = await target_images_collection.find_one({"_id": ObjectId(request.target_image_id)})
+    # -----------------------------
+    # Call HF Space Gradio endpoint
+    # -----------------------------
+    async with aiohttp.ClientSession() as session:
+        payload = {
+            "data": [
+                {"name": "src", "data": src_bytes.hex()},
+                {"name": "tgt", "data": tgt_bytes.hex()}
+            ]
+        }
+        async with session.post(HF_GRADIO_URL, json=payload) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise HTTPException(status_code=500, detail=f"HF Space call failed: {text}")
+            response_json = await resp.json()
 
-    if not source_doc:
-        raise HTTPException(status_code=404, detail="Source image not found")
-    if not target_doc:
-        raise HTTPException(status_code=404, detail="Target image not found")
+    final_img_b64 = response_json.get("data")[0]  # base64 string from HF Space
+    if not final_img_b64:
+        raise HTTPException(status_code=500, detail="HF Space did not return final image")
 
-    result_data, error = await call_huggingface_space(source_doc["image_data"], target_doc["image_data"])
-    if error:
-        raise HTTPException(status_code=500, detail=error)
+    # -----------------------------
+    # Save final image locally
+    # -----------------------------
+    final_bytes = base64.b64decode(final_img_b64)
+    final_name = f"result_{uuid.uuid4().hex}.png"
+    final_path = os.path.join(RESULT_DIR, final_name)
+    with open(final_path, "wb") as f:
+        f.write(final_bytes)
 
-    doc = {
-        "filename": f"faceswap_result_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png",
-        "image_data": result_data,
-        "content_type": "image/png",
-        "source_image_id": ObjectId(request.source_image_id),
-        "target_image_id": ObjectId(request.target_image_id),
-        "created_at": datetime.utcnow()
-    }
+    # -----------------------------
+    # Store result in MongoDB
+    # -----------------------------
+    doc = {"source_id": source_id, "target_id": target_id, "path": final_path}
     result = await results_collection.insert_one(doc)
-    return {"result_id": str(result.inserted_id), "message": "Face swap completed successfully"}
 
-@app.get("/api/results/{result_id}")
+    return {"result_id": str(result.inserted_id), "path": final_path}
+
+@app.get("/download/{result_id}")
 async def download_result(result_id: str):
-    result = await results_collection.find_one({"_id": ObjectId(result_id)})
-    if not result:
+    """Download enhanced face image"""
+    doc = await results_collection.find_one({"_id": ObjectId(result_id)})
+    if not doc:
         raise HTTPException(status_code=404, detail="Result not found")
-    return StreamingResponse(io.BytesIO(result["image_data"]),
-                             media_type=result["content_type"],
-                             headers={"Content-Disposition": f"attachment; filename={result['filename']}"})
+    return FileResponse(doc["path"], media_type="image/png", filename="enhanced_face.png")
 
-@app.get("/api/results")
-async def get_all_results():
+@app.get("/target_images")
+async def list_target_images():
+    """List all target images stored in MongoDB with their IDs"""
+    cursor = target_images_collection.find({})
     results = []
-    async for res in results_collection.find({}, {"image_data": 0}):
-        results.append({
-            "id": str(res["_id"]),
-            "filename": res["filename"],
-            "content_type": res["content_type"],
-            "source_image_id": str(res["source_image_id"]),
-            "target_image_id": str(res["target_image_id"]),
-            "created_at": res["created_at"]
-        })
+    async for doc in cursor:
+        results.append({"target_id": str(doc["_id"]), "filename": doc["filename"]})
     return results
-
-@app.get("/api/health")
-async def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow()}
-
-# -------------------------------
-# Startup: preload target images
-# -------------------------------
-async def preload_target_images():
-    target_images_dir = "Target_Images"
-    if os.path.exists(target_images_dir):
-        for filename in os.listdir(target_images_dir):
-            if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-                file_path = os.path.join(target_images_dir, filename)
-                exists = await target_images_collection.find_one({"filename": filename})
-                if not exists:
-                    with open(file_path, 'rb') as f:
-                        img_data = f.read()
-                    await target_images_collection.insert_one({
-                        "filename": filename,
-                        "image_data": img_data,
-                        "content_type": f"image/{filename.split('.')[-1].lower()}",
-                        "uploaded_at": datetime.utcnow()
-                    })
-
-@app.on_event("startup")
-async def startup_event():
-    await preload_target_images()
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
