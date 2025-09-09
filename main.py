@@ -11,8 +11,8 @@ import base64
 import io
 from PIL import Image
 import os
-import json
 import asyncio
+
 app = FastAPI(title="FaceSwap API", version="1.0.0")
 
 # -------------------------------
@@ -20,7 +20,7 @@ app = FastAPI(title="FaceSwap API", version="1.0.0")
 # -------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -40,7 +40,7 @@ source_images_collection = database.get_collection("Source_Images")
 results_collection = database.get_collection("Results")
 
 # -------------------------------
-# Hugging Face Space URL
+# Hugging Face Space URL (fixed)
 # -------------------------------
 HF_SPACE_URL = "https://logicgoinfotechspaces-faceswap.hf.space/run/predict"
 
@@ -62,44 +62,38 @@ class FaceSwapResponse(BaseModel):
     message: str
 
 # -------------------------------
-# Utility function: call HF Space
+# Utility: call Hugging Face Space
 # -------------------------------
-def to_base64(img_bytes):
-    return base64.b64encode(img_bytes).decode("utf-8")
-
 async def call_huggingface_space(src_img_data, tgt_img_data):
     """
-    Call the Hugging Face Space's /run/predict endpoint with base64 images.
+    Call HF Space /run/predict endpoint with base64 images.
     """
     try:
-        # Convert images to base64
         src_b64 = base64.b64encode(src_img_data).decode("utf-8")
         tgt_b64 = base64.b64encode(tgt_img_data).decode("utf-8")
-        
-        # Gradio /run/predict expects JSON payload like this:
-        payload = {
-            "data": [src_b64, tgt_b64]
-        }
+
+        payload = {"data": [src_b64, tgt_b64]}
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(HF_SPACE_URL, json=payload, timeout=aiohttp.ClientTimeout(total=300)) as response:
+            async with session.post(
+                HF_SPACE_URL,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=300)
+            ) as response:
                 if response.status != 200:
-                    error_text = await response.text()
-                    print(f"Hugging Face Space error: {error_text}")
-                    return None, f"Hugging Face API error: {error_text}"
-                
+                    text = await response.text()
+                    print(f"Hugging Face Space error: {text}")
+                    return None, f"Hugging Face API error: {text}"
+
                 resp_json = await response.json()
-                
-                # The output image comes base64-encoded in resp_json["data"][0]
-                result_b64 = resp_json.get("data", [])[0]
+                result_b64 = resp_json.get("data", [None])[0]
                 if not result_b64:
                     return None, "Empty response from Hugging Face Space"
 
-                result_bytes = base64.b64decode(result_b64)
-                return result_bytes, None
+                return base64.b64decode(result_b64), None
 
     except asyncio.TimeoutError:
-        return None, "Request timeout - Hugging Face Space took too long to respond"
+        return None, "Request timeout - Hugging Face Space took too long"
     except Exception as e:
         return None, f"Failed to call Hugging Face Space: {str(e)}"
 
@@ -110,160 +104,116 @@ async def call_huggingface_space(src_img_data, tgt_img_data):
 async def root():
     return {"message": "FaceSwap API is running", "status": "healthy"}
 
-# 1. Upload Source Image
 @app.post("/api/upload/source", response_model=ImageResponse)
 async def upload_source_image(file: UploadFile = File(...)):
+    contents = await file.read()
     try:
-        contents = await file.read()
-        Image.open(io.BytesIO(contents))  # validate image
+        Image.open(io.BytesIO(contents))
+    except:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+    doc = {
+        "filename": file.filename,
+        "image_data": contents,
+        "content_type": file.content_type,
+        "uploaded_at": datetime.utcnow()
+    }
+    result = await source_images_collection.insert_one(doc)
+    return {
+        "id": str(result.inserted_id),
+        "filename": file.filename,
+        "content_type": file.content_type,
+        "uploaded_at": doc["uploaded_at"]
+    }
 
-        image_doc = {
-            "filename": file.filename,
-            "image_data": contents,
-            "content_type": file.content_type,
-            "uploaded_at": datetime.utcnow()
-        }
-        result = await source_images_collection.insert_one(image_doc)
-        return {
-            "id": str(result.inserted_id),
-            "filename": file.filename,
-            "content_type": file.content_type,
-            "uploaded_at": image_doc["uploaded_at"]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# 2. Get All Target Images
 @app.get("/api/target-images", response_model=List[ImageResponse])
 async def get_target_images():
-    try:
-        images = []
-        async for image in target_images_collection.find({}, {"image_data": 0}):
-            images.append({
-                "id": str(image["_id"]),
-                "filename": image["filename"],
-                "content_type": image["content_type"],
-                "uploaded_at": image["uploaded_at"]
-            })
-        return images
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    images = []
+    async for img in target_images_collection.find({}, {"image_data": 0}):
+        images.append({
+            "id": str(img["_id"]),
+            "filename": img["filename"],
+            "content_type": img["content_type"],
+            "uploaded_at": img["uploaded_at"]
+        })
+    return images
 
-# 3. Get Specific Target Image
 @app.get("/api/target-images/{image_id}")
 async def get_target_image(image_id: str):
-    try:
-        image = await target_images_collection.find_one({"_id": ObjectId(image_id)})
-        if not image:
-            raise HTTPException(status_code=404, detail="Image not found")
-        return StreamingResponse(
-            io.BytesIO(image["image_data"]),
-            media_type=image["content_type"],
-            headers={"Content-Disposition": f"inline; filename={image['filename']}"}
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    img = await target_images_collection.find_one({"_id": ObjectId(image_id)})
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return StreamingResponse(io.BytesIO(img["image_data"]), media_type=img["content_type"],
+                             headers={"Content-Disposition": f"inline; filename={img['filename']}"})
 
-# 4. Upload Target Image (Admin)
 @app.post("/api/upload/target", response_model=ImageResponse)
 async def upload_target_image(file: UploadFile = File(...)):
+    contents = await file.read()
     try:
-        contents = await file.read()
-        Image.open(io.BytesIO(contents))  # validate image
+        Image.open(io.BytesIO(contents))
+    except:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+    doc = {
+        "filename": file.filename,
+        "image_data": contents,
+        "content_type": file.content_type,
+        "uploaded_at": datetime.utcnow()
+    }
+    result = await target_images_collection.insert_one(doc)
+    return {
+        "id": str(result.inserted_id),
+        "filename": file.filename,
+        "content_type": file.content_type,
+        "uploaded_at": doc["uploaded_at"]
+    }
 
-        image_doc = {
-            "filename": file.filename,
-            "image_data": contents,
-            "content_type": file.content_type,
-            "uploaded_at": datetime.utcnow()
-        }
-        result = await target_images_collection.insert_one(image_doc)
-        return {
-            "id": str(result.inserted_id),
-            "filename": file.filename,
-            "content_type": file.content_type,
-            "uploaded_at": image_doc["uploaded_at"]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# 5. Face Swap
 @app.post("/api/faceswap", response_model=FaceSwapResponse)
 async def perform_face_swap(request: FaceSwapRequest):
-    try:
-        source_doc = await source_images_collection.find_one({"_id": ObjectId(request.source_image_id)})
-        target_doc = await target_images_collection.find_one({"_id": ObjectId(request.target_image_id)})
+    source_doc = await source_images_collection.find_one({"_id": ObjectId(request.source_image_id)})
+    target_doc = await target_images_collection.find_one({"_id": ObjectId(request.target_image_id)})
 
-        if not source_doc:
-            raise HTTPException(status_code=404, detail="Source image not found")
-        if not target_doc:
-            raise HTTPException(status_code=404, detail="Target image not found")
+    if not source_doc:
+        raise HTTPException(status_code=404, detail="Source image not found")
+    if not target_doc:
+        raise HTTPException(status_code=404, detail="Target image not found")
 
-        # Call Hugging Face Space
-        result_data, error = await call_huggingface_space(
-            source_doc["image_data"], 
-            target_doc["image_data"]
-        )
-        if error:
-            raise HTTPException(status_code=500, detail=error)
-        if not result_data:
-            raise HTTPException(status_code=500, detail="No result returned from HF Space")
+    result_data, error = await call_huggingface_space(source_doc["image_data"], target_doc["image_data"])
+    if error:
+        raise HTTPException(status_code=500, detail=error)
 
-        # Store result in MongoDB
-        result_doc = {
-            "filename": f"faceswap_result_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png",
-            "image_data": result_data,
-            "content_type": "image/png",
-            "source_image_id": ObjectId(request.source_image_id),
-            "target_image_id": ObjectId(request.target_image_id),
-            "created_at": datetime.utcnow()
-        }
-        result = await results_collection.insert_one(result_doc)
+    doc = {
+        "filename": f"faceswap_result_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png",
+        "image_data": result_data,
+        "content_type": "image/png",
+        "source_image_id": ObjectId(request.source_image_id),
+        "target_image_id": ObjectId(request.target_image_id),
+        "created_at": datetime.utcnow()
+    }
+    result = await results_collection.insert_one(doc)
+    return {"result_id": str(result.inserted_id), "message": "Face swap completed successfully"}
 
-        return {
-            "result_id": str(result.inserted_id),
-            "message": "Face swap completed successfully"
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# 6. Download Result
 @app.get("/api/results/{result_id}")
 async def download_result(result_id: str):
-    try:
-        result = await results_collection.find_one({"_id": ObjectId(result_id)})
-        if not result:
-            raise HTTPException(status_code=404, detail="Result not found")
-        return StreamingResponse(
-            io.BytesIO(result["image_data"]),
-            media_type=result["content_type"],
-            headers={"Content-Disposition": f"attachment; filename={result['filename']}"}
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    result = await results_collection.find_one({"_id": ObjectId(result_id)})
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    return StreamingResponse(io.BytesIO(result["image_data"]),
+                             media_type=result["content_type"],
+                             headers={"Content-Disposition": f"attachment; filename={result['filename']}"})
 
-# 7. Get All Results
 @app.get("/api/results")
 async def get_all_results():
-    try:
-        results = []
-        async for result in results_collection.find({}, {"image_data": 0}):
-            results.append({
-                "id": str(result["_id"]),
-                "filename": result["filename"],
-                "content_type": result["content_type"],
-                "source_image_id": str(result["source_image_id"]),
-                "target_image_id": str(result["target_image_id"]),
-                "created_at": result["created_at"]
-            })
-        return results
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    results = []
+    async for res in results_collection.find({}, {"image_data": 0}):
+        results.append({
+            "id": str(res["_id"]),
+            "filename": res["filename"],
+            "content_type": res["content_type"],
+            "source_image_id": str(res["source_image_id"]),
+            "target_image_id": str(res["target_image_id"]),
+            "created_at": res["created_at"]
+        })
+    return results
 
-# 8. Health Check
 @app.get("/api/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow()}
@@ -277,13 +227,13 @@ async def preload_target_images():
         for filename in os.listdir(target_images_dir):
             if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
                 file_path = os.path.join(target_images_dir, filename)
-                existing = await target_images_collection.find_one({"filename": filename})
-                if not existing:
+                exists = await target_images_collection.find_one({"filename": filename})
+                if not exists:
                     with open(file_path, 'rb') as f:
-                        image_data = f.read()
+                        img_data = f.read()
                     await target_images_collection.insert_one({
                         "filename": filename,
-                        "image_data": image_data,
+                        "image_data": img_data,
                         "content_type": f"image/{filename.split('.')[-1].lower()}",
                         "uploaded_at": datetime.utcnow()
                     })
