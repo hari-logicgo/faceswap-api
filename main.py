@@ -11,7 +11,8 @@ import base64
 import io
 from PIL import Image
 import os
-
+import json
+import asyncio
 app = FastAPI(title="FaceSwap API", version="1.0.0")
 
 # -------------------------------
@@ -68,33 +69,37 @@ def to_base64(img_bytes):
 
 async def call_huggingface_space(src_img_data, tgt_img_data):
     """
-    Call the Gradio Space /run/predict endpoint
+    Call the Hugging Face Space's /run/predict endpoint with base64 images.
     """
     try:
+        # Convert images to base64
+        src_b64 = base64.b64encode(src_img_data).decode("utf-8")
+        tgt_b64 = base64.b64encode(tgt_img_data).decode("utf-8")
+        
+        # Gradio /run/predict expects JSON payload like this:
         payload = {
-            "data": [
-                f"data:image/jpeg;base64,{to_base64(src_img_data)}",
-                f"data:image/jpeg;base64,{to_base64(tgt_img_data)}"
-            ]
+            "data": [src_b64, tgt_b64]
         }
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                HF_SPACE_URL,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=300)
-            ) as response:
-
+            async with session.post(HF_SPACE_URL, json=payload, timeout=aiohttp.ClientTimeout(total=300)) as response:
                 if response.status != 200:
-                    text = await response.text()
-                    return None, f"Hugging Face API error: {text}"
+                    error_text = await response.text()
+                    print(f"Hugging Face Space error: {error_text}")
+                    return None, f"Hugging Face API error: {error_text}"
+                
+                resp_json = await response.json()
+                
+                # The output image comes base64-encoded in resp_json["data"][0]
+                result_b64 = resp_json.get("data", [])[0]
+                if not result_b64:
+                    return None, "Empty response from Hugging Face Space"
 
-                result_json = await response.json()
-                # Gradio returns base64 image in result_json["data"][0]
-                result_b64 = result_json["data"][0]
-                header, encoded = result_b64.split(",", 1)
-                return base64.b64decode(encoded), None
+                result_bytes = base64.b64decode(result_b64)
+                return result_bytes, None
 
+    except asyncio.TimeoutError:
+        return None, "Request timeout - Hugging Face Space took too long to respond"
     except Exception as e:
         return None, f"Failed to call Hugging Face Space: {str(e)}"
 
