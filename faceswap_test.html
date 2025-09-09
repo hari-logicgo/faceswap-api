@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>FaceSwap API Tester</title>
+</head>
+<body>
+  <h1>Test Hugging Face FaceSwap API</h1>
+
+  <form id="faceswapForm">
+    <label>Source Image:</label>
+    <input type="file" name="src_img" id="src_img" accept="image/*" required><br><br>
+
+    <label>Target Image:</label>
+    <input type="file" name="tgt_img" id="tgt_img" accept="image/*" required><br><br>
+
+    <button type="submit">Swap Faces</button>
+  </form>
+
+  <h2>Result:</h2>
+  <p id="status"></p>
+  <img id="resultImg" style="max-width:500px; display:none;" />
+  <br>
+  <a id="downloadBtn" href="#" download="faceswap_result.png" style="display:none;">⬇️ Download Result</a>
+
+  <script>
+    const form = document.getElementById("faceswapForm");
+    const statusEl = document.getElementById("status");
+    const resultImg = document.getElementById("resultImg");
+    const downloadBtn = document.getElementById("downloadBtn");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      statusEl.textContent = "⏳ Uploading and processing...";
+      resultImg.style.display = "none";
+      downloadBtn.style.display = "none";
+
+      const formData = new FormData();
+      formData.append("src_img", document.getElementById("src_img").files[0]);
+      formData.append("tgt_img", document.getElementById("tgt_img").files[0]);
+
+      try {
+        // Replace <your-space> with your actual HF Space name
+        const res = await fetch("https://logicgoinfotechspaces-faceswap.hf.space", {
+          method: "POST",
+          body: formData
+        });
+
+        if (!res.ok) {
+          throw new Error(`Server error: ${res.status}`);
+        }
+
+        const blob = await res.blob();
+        const imgUrl = URL.createObjectURL(blob);
+
+        // Show image
+        resultImg.src = imgUrl;
+        resultImg.style.display = "block";
+
+        // Enable download
+        downloadBtn.href = imgUrl;
+        downloadBtn.style.display = "inline-block";
+
+        statusEl.textContent = "✅ Face swap completed!";
+      } catch (err) {
+        statusEl.textContent = "❌ Error: " + err.message;
+      }
+    });
+  </script>
+</body>
+</html>

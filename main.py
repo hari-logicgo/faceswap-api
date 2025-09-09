@@ -1,23 +1,22 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
-import requests
-from datetime import datetime
-import os
+from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
+from pydantic import BaseModel
+from typing import List
+from datetime import datetime
 import aiohttp
 import base64
 import io
 from PIL import Image
-import uuid
-from pydantic import BaseModel
-from typing import List, Optional
-import json
-import asyncio
+import os
+
 app = FastAPI(title="FaceSwap API", version="1.0.0")
 
+# -------------------------------
 # CORS middleware
+# -------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Adjust for production
@@ -26,19 +25,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# -------------------------------
 # MongoDB connection
-# MongoDB connection - UPDATED VERSION
-MONGODB_URL = os.getenv("MONGODB_URL", "mongodb+srv://harilogicgo_db_user:logicgoinfotech@cluster0.dcs1tnb.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
+# -------------------------------
+MONGODB_URL = os.getenv(
+    "MONGODB_URL",
+    "mongodb+srv://harilogicgo_db_user:logicgoinfotech@cluster0.dcs1tnb.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+)
 client = AsyncIOMotorClient(MONGODB_URL)
 database = client.FaceSwap
 target_images_collection = database.get_collection("Target_Images")
 source_images_collection = database.get_collection("Source_Images")
 results_collection = database.get_collection("Results")
 
+# -------------------------------
 # Hugging Face Space URL
-HF_SPACE_URL = "https://logicgoinfotechspaces-faceswap.hf.space"
+# -------------------------------
+HF_SPACE_URL = "https://logicgoinfotechspaces-faceswap.hf.space/run/predict"
 
+# -------------------------------
 # Pydantic models
+# -------------------------------
 class ImageResponse(BaseModel):
     id: str
     filename: str
@@ -53,84 +60,65 @@ class FaceSwapResponse(BaseModel):
     result_id: str
     message: str
 
-# Utility functions
-# Utility functions
+# -------------------------------
+# Utility function: call HF Space
+# -------------------------------
+def to_base64(img_bytes):
+    return base64.b64encode(img_bytes).decode("utf-8")
+
 async def call_huggingface_space(src_img_data, tgt_img_data):
     """
-    Call the Hugging Face Space API for face swapping
+    Call the Gradio Space /run/predict endpoint
     """
     try:
-        print("Preparing to call Hugging Face Space...")
-        
-        # Prepare files for the request
-        files = {
-            'src_img': ('source.jpg', src_img_data, 'image/jpeg'),
-            'tgt_img': ('target.jpg', tgt_img_data, 'image/jpeg')
+        payload = {
+            "data": [
+                f"data:image/jpeg;base64,{to_base64(src_img_data)}",
+                f"data:image/jpeg;base64,{to_base64(tgt_img_data)}"
+            ]
         }
-        
-        print("Making request to Hugging Face Space...")
-        
-        # Make the request to Hugging Face Space
+
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{HF_SPACE_URL}/api/faceswap",
-                data=files,
-                timeout=aiohttp.ClientTimeout(total=300)  # 5 minute timeout
+                HF_SPACE_URL,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=300)
             ) as response:
-                print(f"Hugging Face Space response status: {response.status}")
-                
+
                 if response.status != 200:
-                    error_text = await response.text()
-                    print(f"Hugging Face Space error: {error_text}")
-                    return None, f"Hugging Face API error: {error_text}"
-                
-                # Get the image data from response
-                result_data = await response.read()
-                print(f"Received response data of length: {len(result_data)}")
-                
-                if len(result_data) == 0:
-                    return None, "Empty response from Hugging Face Space"
-                
-                return result_data, None
-                
-    except asyncio.TimeoutError:
-        print("Timeout calling Hugging Face Space")
-        return None, "Request timeout - Hugging Face Space took too long to respond"
+                    text = await response.text()
+                    return None, f"Hugging Face API error: {text}"
+
+                result_json = await response.json()
+                # Gradio returns base64 image in result_json["data"][0]
+                result_b64 = result_json["data"][0]
+                header, encoded = result_b64.split(",", 1)
+                return base64.b64decode(encoded), None
+
     except Exception as e:
-        print(f"Exception calling Hugging Face Space: {str(e)}")
         return None, f"Failed to call Hugging Face Space: {str(e)}"
 
+# -------------------------------
 # API Endpoints
-
+# -------------------------------
 @app.get("/")
 async def root():
     return {"message": "FaceSwap API is running", "status": "healthy"}
 
-# 1. Upload Source Image Endpoint
+# 1. Upload Source Image
 @app.post("/api/upload/source", response_model=ImageResponse)
 async def upload_source_image(file: UploadFile = File(...)):
-    """
-    Upload a source image for face swapping
-    """
     try:
         contents = await file.read()
-        
-        # Verify it's an image
-        try:
-            Image.open(io.BytesIO(contents))
-        except:
-            raise HTTPException(status_code=400, detail="Invalid image file")
-        
-        # Store in MongoDB
+        Image.open(io.BytesIO(contents))  # validate image
+
         image_doc = {
             "filename": file.filename,
             "image_data": contents,
             "content_type": file.content_type,
             "uploaded_at": datetime.utcnow()
         }
-        
         result = await source_images_collection.insert_one(image_doc)
-        
         return {
             "id": str(result.inserted_id),
             "filename": file.filename,
@@ -140,37 +128,29 @@ async def upload_source_image(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 2. Get Target Images Endpoint
+# 2. Get All Target Images
 @app.get("/api/target-images", response_model=List[ImageResponse])
 async def get_target_images():
-    """
-    Get all available target images from database
-    """
     try:
         images = []
-        async for image in target_images_collection.find({}, {"image_data": 0}):  # Exclude image data for listing
+        async for image in target_images_collection.find({}, {"image_data": 0}):
             images.append({
                 "id": str(image["_id"]),
                 "filename": image["filename"],
                 "content_type": image["content_type"],
                 "uploaded_at": image["uploaded_at"]
             })
-        
         return images
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 3. Get Specific Target Image Endpoint
+# 3. Get Specific Target Image
 @app.get("/api/target-images/{image_id}")
 async def get_target_image(image_id: str):
-    """
-    Get a specific target image by ID
-    """
     try:
         image = await target_images_collection.find_one({"_id": ObjectId(image_id)})
         if not image:
             raise HTTPException(status_code=404, detail="Image not found")
-        
         return StreamingResponse(
             io.BytesIO(image["image_data"]),
             media_type=image["content_type"],
@@ -179,31 +159,20 @@ async def get_target_image(image_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 4. Upload Target Image Endpoint (Admin functionality)
+# 4. Upload Target Image (Admin)
 @app.post("/api/upload/target", response_model=ImageResponse)
 async def upload_target_image(file: UploadFile = File(...)):
-    """
-    Upload a target image to the database (Admin endpoint)
-    """
     try:
         contents = await file.read()
-        
-        # Verify it's an image
-        try:
-            Image.open(io.BytesIO(contents))
-        except:
-            raise HTTPException(status_code=400, detail="Invalid image file")
-        
-        # Store in MongoDB
+        Image.open(io.BytesIO(contents))  # validate image
+
         image_doc = {
             "filename": file.filename,
             "image_data": contents,
             "content_type": file.content_type,
             "uploaded_at": datetime.utcnow()
         }
-        
         result = await target_images_collection.insert_one(image_doc)
-        
         return {
             "id": str(result.inserted_id),
             "filename": file.filename,
@@ -213,43 +182,28 @@ async def upload_target_image(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 5. Face Swap Endpoint
-# 5. Face Swap Endpoint
+# 5. Face Swap
 @app.post("/api/faceswap", response_model=FaceSwapResponse)
 async def perform_face_swap(request: FaceSwapRequest):
-    """
-    Perform face swap between source and target images
-    """
     try:
-        print(f"Starting face swap with source: {request.source_image_id}, target: {request.target_image_id}")
-        
-        # Get source and target images from MongoDB
         source_doc = await source_images_collection.find_one({"_id": ObjectId(request.source_image_id)})
         target_doc = await target_images_collection.find_one({"_id": ObjectId(request.target_image_id)})
-        
+
         if not source_doc:
             raise HTTPException(status_code=404, detail="Source image not found")
         if not target_doc:
             raise HTTPException(status_code=404, detail="Target image not found")
-        
-        print("Images found in database, calling Hugging Face Space...")
-        
-        # Call Hugging Face Space for face swapping
+
+        # Call Hugging Face Space
         result_data, error = await call_huggingface_space(
             source_doc["image_data"], 
             target_doc["image_data"]
         )
-        
         if error:
-            print(f"Hugging Face Space error: {error}")
             raise HTTPException(status_code=500, detail=error)
-        
         if not result_data:
-            print("No result data returned from Hugging Face Space")
-            raise HTTPException(status_code=500, detail="No result data returned from face swap service")
-        
-        print("Face swap successful, storing result...")
-        
+            raise HTTPException(status_code=500, detail="No result returned from HF Space")
+
         # Store result in MongoDB
         result_doc = {
             "filename": f"faceswap_result_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png",
@@ -259,34 +213,25 @@ async def perform_face_swap(request: FaceSwapRequest):
             "target_image_id": ObjectId(request.target_image_id),
             "created_at": datetime.utcnow()
         }
-        
         result = await results_collection.insert_one(result_doc)
-        
-        print(f"Face swap completed successfully. Result ID: {result.inserted_id}")
-        
+
         return {
             "result_id": str(result.inserted_id),
             "message": "Face swap completed successfully"
         }
-        
+
     except HTTPException:
-        # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        print(f"Unexpected error in face swap: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-# 6. Download Result Endpoint
+# 6. Download Result
 @app.get("/api/results/{result_id}")
 async def download_result(result_id: str):
-    """
-    Download the face swap result
-    """
     try:
         result = await results_collection.find_one({"_id": ObjectId(result_id)})
         if not result:
             raise HTTPException(status_code=404, detail="Result not found")
-        
         return StreamingResponse(
             io.BytesIO(result["image_data"]),
             media_type=result["content_type"],
@@ -295,15 +240,12 @@ async def download_result(result_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 7. Get All Results Endpoint
+# 7. Get All Results
 @app.get("/api/results")
 async def get_all_results():
-    """
-    Get metadata for all face swap results
-    """
     try:
         results = []
-        async for result in results_collection.find({}, {"image_data": 0}):  # Exclude image data
+        async for result in results_collection.find({}, {"image_data": 0}):
             results.append({
                 "id": str(result["_id"]),
                 "filename": result["filename"],
@@ -312,47 +254,35 @@ async def get_all_results():
                 "target_image_id": str(result["target_image_id"]),
                 "created_at": result["created_at"]
             })
-        
         return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 8. Health Check Endpoint
+# 8. Health Check
 @app.get("/api/health")
 async def health_check():
-    """
-    Health check endpoint
-    """
     return {"status": "healthy", "timestamp": datetime.utcnow()}
 
-# Preload target images from folder (run once at startup)
+# -------------------------------
+# Startup: preload target images
+# -------------------------------
 async def preload_target_images():
-    """
-    Preload target images from Target_Images folder to MongoDB
-    """
     target_images_dir = "Target_Images"
     if os.path.exists(target_images_dir):
         for filename in os.listdir(target_images_dir):
             if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
                 file_path = os.path.join(target_images_dir, filename)
-                
-                # Check if image already exists in database
                 existing = await target_images_collection.find_one({"filename": filename})
                 if not existing:
                     with open(file_path, 'rb') as f:
                         image_data = f.read()
-                    
-                    image_doc = {
+                    await target_images_collection.insert_one({
                         "filename": filename,
                         "image_data": image_data,
                         "content_type": f"image/{filename.split('.')[-1].lower()}",
                         "uploaded_at": datetime.utcnow()
-                    }
-                    
-                    await target_images_collection.insert_one(image_doc)
-                    print(f"Preloaded target image: {filename}")
+                    })
 
-# Run on startup
 @app.on_event("startup")
 async def startup_event():
     await preload_target_images()

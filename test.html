@@ -1,5 +1,133 @@
 <!DOCTYPE html>
 <html>
+<head>
+    <title>FaceSwap API Test</title>
+</head>
+<body>
+    <h2>FaceSwap API Test</h2>
+
+    <!-- Health Check -->
+    <button onclick="testHealth()">Test Health</button>
+    <br><br>
+
+    <!-- Get Target Images -->
+    <button onclick="getTargetImages()">Get Target Images</button>
+    <div id="targetImages"></div>
+    <br>
+
+    <!-- Upload Source Image -->
+    <h3>Upload Source Image</h3>
+    <input type="file" id="sourceImage">
+    <button onclick="uploadSource()">Upload</button>
+    <div id="uploadResult"></div>
+    <br>
+
+    <!-- Face Swap -->
+    <h3>Perform Face Swap</h3>
+    <input type="text" id="sourceId" placeholder="Source ID">
+    <input type="text" id="targetId" placeholder="Target ID">
+    <button onclick="faceSwap()">Swap Faces</button>
+    <div id="swapResult"></div>
+    <br>
+
+    <!-- Download Result -->
+    <h3>Download Result</h3>
+    <input type="text" id="resultId" placeholder="Result ID">
+    <button onclick="downloadResult()">Download</button>
+
+    <script>
+        const BASE_URL = 'https://faceswap-api-fqoz.onrender.com'; // replace with your Render URL
+
+        // Health check
+        async function testHealth() {
+            try {
+                const res = await fetch(`${BASE_URL}/api/health`);
+                const data = await res.json();
+                alert('Health: ' + JSON.stringify(data));
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        }
+
+        // Get all target images
+        async function getTargetImages() {
+            try {
+                const res = await fetch(`${BASE_URL}/api/target-images`);
+                const data = await res.json();
+                let html = "<ul>";
+                data.forEach(img => {
+                    html += `<li>${img.filename} (ID: ${img.id})</li>`;
+                });
+                html += "</ul>";
+                document.getElementById('targetImages').innerHTML = html;
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        }
+
+        // Upload source image
+        async function uploadSource() {
+            const fileInput = document.getElementById('sourceImage');
+            if (!fileInput.files[0]) {
+                alert('Please select a file');
+                return;
+            }
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            try {
+                const res = await fetch(`${BASE_URL}/api/upload/source`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                document.getElementById('uploadResult').innerText = JSON.stringify(data, null, 2);
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        }
+
+        // Perform face swap
+        async function faceSwap() {
+            const sourceId = document.getElementById('sourceId').value;
+            const targetId = document.getElementById('targetId').value;
+            if (!sourceId || !targetId) {
+                alert('Please enter both IDs');
+                return;
+            }
+
+            try {
+                const res = await fetch(`${BASE_URL}/api/faceswap`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        source_image_id: sourceId,
+                        target_image_id: targetId
+                    })
+                });
+                const data = await res.json();
+                document.getElementById('swapResult').innerText = JSON.stringify(data, null, 2);
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        }
+
+        // Download result image
+        function downloadResult() {
+            const resultId = document.getElementById('resultId').value;
+            if (!resultId) {
+                alert('Please enter Result ID');
+                return;
+            }
+            window.open(`${BASE_URL}/api/results/${resultId}`, '_blank');
+        }
+    </script>
+</body>
+</html>
+
+
+<!-- <!DOCTYPE html>
+<html>
 <body>
     <h2>Test FaceSwap API</h2>
     
@@ -108,4 +236,4 @@
         }
     </script>
 </body>
-</html>
+</html> -->
