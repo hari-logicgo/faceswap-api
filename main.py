@@ -42,7 +42,7 @@ results_collection = database.get_collection("Results")
 # -------------------------------
 # Hugging Face Space URL (fixed)
 # -------------------------------
-HF_SPACE_URL = "https://logicgoinfotechspaces-faceswap.hf.space/run/predict"
+HF_SPACE_URL = "https://logicgoinfotechspaces-faceswap.hf.space/api/faceswap"
 
 # -------------------------------
 # Pydantic models
