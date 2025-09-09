@@ -42,7 +42,7 @@ results_collection = database.get_collection("Results")
 # -------------------------------
 # Hugging Face Space URL (fixed)
 # -------------------------------
-HF_SPACE_URL = "https://logicgoinfotechspaces-faceswap.hf.space/api/faceswap"
+HF_SPACE_URL = "https://logicgoinfotechspaces-faceswap.hf.space"
 
 # -------------------------------
 # Pydantic models
@@ -66,36 +66,52 @@ class FaceSwapResponse(BaseModel):
 # -------------------------------
 async def call_huggingface_space(src_img_data, tgt_img_data):
     """
-    Call HF Space /run/predict endpoint with base64 images.
+    Call HF Space /api/faceswap endpoint with file uploads.
     """
-    try:
-        src_b64 = base64.b64encode(src_img_data).decode("utf-8")
-        tgt_b64 = base64.b64encode(tgt_img_data).decode("utf-8")
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Prepare files for multipart form-data
+            files = {
+                'src_img': ('source.jpg', src_img_data, 'image/jpeg'),
+                'tgt_img': ('target.jpg', tgt_img_data, 'image/jpeg')
+            }
 
-        payload = {"data": [src_b64, tgt_b64]}
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{HF_SPACE_URL}/api/faceswap",
+                    data=files,
+                    timeout=aiohttp.ClientTimeout(total=300)
+                ) as response:
+                    if response.status == 404 and attempt < max_retries - 1:
+                        # Space might be waking up, wait and retry
+                        print(f"Attempt {attempt + 1} failed, retrying in 10 seconds...")
+                        await asyncio.sleep(10)
+                        continue
+                        
+                    if response.status != 200:
+                        error_text = await response.text()
+                        print(f"Hugging Face Space error: {error_text}")
+                        return None, f"Hugging Face API error: {error_text}"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                HF_SPACE_URL,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=300)
-            ) as response:
-                if response.status != 200:
-                    text = await response.text()
-                    print(f"Hugging Face Space error: {text}")
-                    return None, f"Hugging Face API error: {text}"
+                    # Get the image data directly from response
+                    result_data = await response.read()
+                    return result_data, None
 
-                resp_json = await response.json()
-                result_b64 = resp_json.get("data", [None])[0]
-                if not result_b64:
-                    return None, "Empty response from Hugging Face Space"
-
-                return base64.b64decode(result_b64), None
-
-    except asyncio.TimeoutError:
-        return None, "Request timeout - Hugging Face Space took too long"
-    except Exception as e:
-        return None, f"Failed to call Hugging Face Space: {str(e)}"
+        except asyncio.TimeoutError:
+            if attempt < max_retries - 1:
+                print(f"Attempt {attempt + 1} timeout, retrying...")
+                await asyncio.sleep(10)
+                continue
+            return None, "Request timeout - Hugging Face Space took too long"
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"Attempt {attempt + 1} failed, retrying...")
+                await asyncio.sleep(10)
+                continue
+            return None, f"Failed to call Hugging Face Space: {str(e)}"
+    
+    return None, "All retry attempts failed"
 
 # -------------------------------
 # API Endpoints
